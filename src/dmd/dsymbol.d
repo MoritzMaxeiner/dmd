@@ -17,6 +17,7 @@ import core.stdc.string;
 import core.stdc.stdlib;
 
 import dmd.aggregate;
+import dmd.aliasthis;
 import dmd.arraytypes;
 import dmd.attrib;
 import dmd.ast_node;
@@ -415,6 +416,9 @@ extern (C++) class Dsymbol : ASTNode
             deprecation(loc, "is deprecated - %s", message);
         else
             deprecation(loc, "is deprecated");
+
+        if (auto ti = sc.parent ? sc.parent.isInstantiated() : null)
+            ti.printInstantiationTrace(Classification.deprecation);
 
         return true;
     }

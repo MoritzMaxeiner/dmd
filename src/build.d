@@ -22,9 +22,12 @@ import std.parallelism : TaskPool, totalCPUs;
 const thisBuildScript = __FILE_FULL_PATH__.buildNormalizedPath;
 const srcDir = thisBuildScript.dirName;
 const dmdRepo = srcDir.dirName;
+const testDir = dmdRepo.buildPath("test");
+
 shared bool verbose; // output verbose logging
 shared bool force; // always build everything (ignores timestamp checking)
 shared bool dryRun; /// dont execute targets, just print command to be executed
+__gshared int jobs; // Number of jobs to run in parallel
 
 __gshared string[string] env;
 __gshared string[][string] flags;
@@ -38,6 +41,7 @@ immutable rootRules = [
     &runDmdUnittest,
     &clean,
     &checkwhitespace,
+    &runTests,
     &buildFrontendHeaders,
     &runCxxHeadersTest,
     &runCxxUnittest,
@@ -72,7 +76,7 @@ int main(string[] args)
 
 void runMain(string[] args)
 {
-    int jobs = totalCPUs;
+    jobs = totalCPUs;
     bool calledFromMake = false;
     auto res = getopt(args,
         "j|jobs", "Specifies the number of jobs (commands) to run simultaneously (default: %d)".format(totalCPUs), &jobs,
@@ -437,6 +441,30 @@ alias dmdDefault = makeRule!((builder, rule) => builder
     .description("Build dmd")
     .deps([dmdExe(null, null, null), dmdConf])
 );
+
+/// Run's the test suite (unittests & `run.d`)
+alias runTests = makeRule!((testBuilder, testRule)
+{
+    // Precompiles the test runner
+    alias runner = methodInit!(BuildRule, (rundBuilder, rundRule) => rundBuilder
+        .msg("(DMD) RUN.D")
+        .sources([ testDir.buildPath( "run.d") ])
+        .target(env["GENERATED"].buildPath("run".exeName))
+        .command([ env["HOST_DMD"], "-of=" ~ rundRule.target, "-i", "-I" ~ testDir] ~ rundRule.sources));
+
+    testBuilder
+        .name("test")
+        .description("Run the test suite using test/run.d")
+        .msg("(RUN) TEST")
+        .deps([dmdDefault, runDmdUnittest, runner])
+        .commandFunction({
+            // Use spawnProcess to avoid output redirection for `command`s
+            const scope cmd = [ runner.targets[0], "-j" ~ jobs.to!string ];
+            log("%-(%s %)", cmd);
+            if (spawnProcess(cmd, null, Config.init, testDir).wait())
+                abortBuild("Tests failed!");
+        });
+});
 
 /// BuildRule to run the DMD unittest executable.
 alias runDmdUnittest = makeRule!((builder, rule) {
@@ -963,12 +991,20 @@ void parseEnvironment()
         // default to PIC on x86_64, use PIC=1/0 to en-/disable PIC.
         // Note that shared libraries and C files are always compiled with PIC.
         bool pic;
-        version(X86_64)
+        if (model == "64")
             pic = true;
-        else version(X86)
+        else if (model == "32")
             pic = false;
-        if (env.getNumberedBool("PIC"))
-            pic = true;
+
+        const picValue = env.getDefault("PIC", "");
+        switch (picValue)
+        {
+            case "": /** Keep the default **/ break;
+            case "0": pic = false; break;
+            case "1": pic = true; break;
+            default:
+                throw abortBuild(format("Variable 'PIC' should be '0', '1' or <empty> but got '%s'", picValue));
+        }
 
         env["PIC_FLAG"]  = pic ? "-fPIC" : "";
     }
